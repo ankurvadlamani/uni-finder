@@ -16,7 +16,7 @@ window.UNI_CONFIG = {
   },
 
   // URL of your deployed Cloudflare Worker, e.g. "https://uni-finder-ai.<you>.workers.dev"
-  aiWorkerUrl: "",
+  aiWorkerUrl: "https://uni-finder-ai.vadlamir4.workers.dev",
 
   // Shown in the footer
   siteName: "Uni Finder"
