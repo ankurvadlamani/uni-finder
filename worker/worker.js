@@ -5,7 +5,7 @@
 // • Per-user daily limit (needs the RATE KV namespace; see wrangler.toml)
 // • Builds the prompts here so the key can't be used for arbitrary requests
 //
-// Env vars (wrangler.toml [vars]): FIREBASE_PROJECT_ID, ALLOWED_ORIGINS, DAILY_LIMIT, GEMINI_MODEL
+// Env vars (wrangler.toml [vars]): FIREBASE_PROJECT_ID, ALLOWED_ORIGINS, DAILY_LIMIT, GEMINI_MODEL, GEMINI_FALLBACK_MODELS (optional)
 
 const JWKS_URL = "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com";
 let jwksCache = { keys: null, exp: 0 };
@@ -31,7 +31,7 @@ export default {
     let uid;
     try {
       const tok = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
-      uid = (await verifyFirebaseToken(tok, env.FIREBASE_PROJECT_ID)).sub;
+      uid = (await verifyFirebaseToken(tok, String(env.FIREBASE_PROJECT_ID || "").trim())).sub;
     } catch (e) {
       return json({ error: "Not signed in (" + e.message + ")" }, 401);
     }
@@ -44,7 +44,7 @@ export default {
     if (!task) return json({ error: "Unknown task" }, 400);
 
     // 3. Daily limit
-    const limit = parseInt(env.DAILY_LIMIT || "40", 10);
+    const limit = parseInt(String(env.DAILY_LIMIT || "40").trim(), 10);
     let used = 0;
     if (env.RATE) {
       const key = `${uid}:${new Date().toISOString().slice(0, 10)}`;
@@ -58,7 +58,12 @@ export default {
       const out = await runTask(task, body.payload || {}, env);
       return json({ ...out, usage: { used: used + task.cost, limit } });
     } catch (e) {
-      return json({ error: e.message }, 502);
+      if (env.RATE) {
+        const key = `${uid}:${new Date().toISOString().slice(0, 10)}`;
+        const now = parseInt((await env.RATE.get(key)) || "0", 10);
+        await env.RATE.put(key, String(Math.max(0, now - task.cost)), { expirationTtl: 60 * 60 * 26 });
+      }
+      return json({ error: e.message + " (no credits were used, please try again)" }, 502);
     }
   }
 };
@@ -98,7 +103,10 @@ function b64urlText(s) { return new TextDecoder().decode(b64urlBytes(s)); }
 
 // ── Gemini ──────────────────────────────────────────────────
 async function gemini(env, prompt, { search = false, jsonMode = false, temperature = 0.3 } = {}) {
-  const model = env.GEMINI_MODEL || "gemini-2.5-flash";
+  // Primary model plus optional comma-separated fallbacks (GEMINI_FALLBACK_MODELS).
+  const clean = v => String(v || "").trim();
+  const models = [clean(env.GEMINI_MODEL) || "gemini-3.8-flash",
+    ...clean(env.GEMINI_FALLBACK_MODELS).split(",").map(clean).filter(Boolean)];
   const body = {
     systemInstruction: { parts: [{ text: SYSTEM }] },
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -107,20 +115,32 @@ async function gemini(env, prompt, { search = false, jsonMode = false, temperatu
   if (search) body.tools = [{ google_search: {} }];
   else if (jsonMode) body.generationConfig.responseMimeType = "application/json";
 
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify(body)
-  });
-  const d = await r.json();
-  if (!r.ok) throw new Error("Gemini: " + (d.error && d.error.message || r.status));
-  const c = (d.candidates || [])[0];
-  if (!c || !c.content) throw new Error("Gemini returned no answer" + (c && c.finishReason ? ` (${c.finishReason})` : ""));
-  const text = c.content.parts.map(p => p.text || "").join("");
-  const gm = c.groundingMetadata || {};
-  const sources = (gm.groundingChunks || []).map(ch => ch.web).filter(Boolean)
-    .map(w => ({ title: w.title, url: w.uri }));
-  return { text, sources, queries: gm.webSearchQueries || [] };
+  let lastErr;
+  for (const model of models) {
+    // Retry busy / rate-limited responses a few times with backoff before moving to the next model.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": clean(env.GEMINI_API_KEY) },
+        body: JSON.stringify(body)
+      });
+      let d; try { d = await r.json(); } catch { d = {}; }
+      if (r.ok) {
+        const c = (d.candidates || [])[0];
+        if (!c || !c.content) { lastErr = new Error("Gemini returned no answer" + (c && c.finishReason ? ` (${c.finishReason})` : "")); break; }
+        const text = c.content.parts.map(p => p.text || "").join("");
+        const gm = c.groundingMetadata || {};
+        const sources = (gm.groundingChunks || []).map(ch => ch.web).filter(Boolean)
+          .map(w => ({ title: w.title, url: w.uri }));
+        return { text, sources, queries: gm.webSearchQueries || [], model };
+      }
+      lastErr = new Error("Gemini: " + (d.error && d.error.message || r.status));
+      const busy = r.status === 429 || r.status === 500 || r.status === 503 || r.status === 504;
+      if (!busy) break;                                   // e.g. bad model name: try the next model
+      if (attempt < 2) await new Promise(res => setTimeout(res, 1500 * (attempt + 1) ** 2));
+    }
+  }
+  throw lastErr;
 }
 
 function parseJSON(text) {
