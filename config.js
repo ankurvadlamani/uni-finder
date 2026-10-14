@@ -7,12 +7,12 @@
 window.UNI_CONFIG = {
   // Firebase console → Project settings → Your apps → Web app → SDK config
   firebase: {
-    apiKey: "",
-    authDomain: "",
-    projectId: "",
-    storageBucket: "",
-    messagingSenderId: "",
-    appId: ""
+    apiKey: "AIzaSyAjF5UxW9NXMTIbKVnq55U7vHS2tWcL9o4",
+    authDomain: "univ-find.firebaseapp.com",
+    projectId: "univ-find",
+    storageBucket: "univ-find.firebasestorage.app",
+    messagingSenderId: "177872400676",
+    appId: "1:177872400676:web:3112b1553982f57ef4c3b1"
   },
 
   // URL of your deployed Cloudflare Worker, e.g. "https://uni-finder-ai.<you>.workers.dev"
