@@ -1,0 +1,7 @@
+{
+  "name": "uni-finder-agent",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node agent.mjs", "dry": "node agent.mjs --dry-run" },
+  "dependencies": { "firebase-admin": "^12.7.0" }
+}
